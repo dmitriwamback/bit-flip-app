@@ -62,26 +62,32 @@ function extractTarget(opStr) {
 }
 
 // Disassemble the binary and return structured instruction data along with cross-references
+// Disassemble the binary and return structured instruction data along with cross-references
 export async function disassembleBinary(parsed) {
 	await ensureLoaded();
 
-    // Determine the architecture and mode for Capstone based on the parsed binary's format and header information
 	const { arch, mode } = resolveArchMode(parsed);
 	const cs = new Capstone(arch, mode);
 
-    // Disassemble the text section of the binary using Capstone
 	const raw = cs.disasm(parsed.text.bytes, parsed.text.baseAddr);
 
-    // Map the raw disassembled instructions into a structured format with additional metadata
+	// Capstone-wasm returns insn.address as an offset relative to the
+	// start of the buffer (0-based), NOT the real virtual address, even
+	// though we passed baseAddr in. Re-apply it manually here so every
+	// address in the app (rows, xrefs, patch targets) is a real vaddr.
+	const base = parsed.text.baseAddr;
+
 	const instructions = raw.map((insn) => {
-
-        // Classify the instruction and extract its target address if applicable
 		const group = classify(insn.mnemonic);
-		const target = group === 'jump' || group === 'call' ? extractTarget(insn.opStr) : null;
+		const rawTarget = group === 'jump' || group === 'call' ? extractTarget(insn.opStr) : null;
 
-        // Return a structured representation of the instruction with relevant details
+		// jump/call targets embedded in the operand string were computed
+		// by Capstone using the same wrong 0-based frame, so they need
+		// the identical correction to stay consistent with `address`.
+		const target = rawTarget !== null ? base + rawTarget : null;
+
 		return {
-			address: insn.address,
+			address: base + insn.address, // <-- corrected
 			bytes: Array.from(insn.bytes)
 				.map((b) => b.toString(16).padStart(2, '0'))
 				.join(' '),
@@ -93,10 +99,7 @@ export async function disassembleBinary(parsed) {
 		};
 	});
 
-    // Build a map of cross-references (xrefs) from target addresses to the instructions that reference them
 	const xrefs = new Map();
-
-    // Iterate over the disassembled instructions to populate the xrefs map
 	for (const insn of instructions) {
 		if (insn.target !== null) {
 			if (!xrefs.has(insn.target)) xrefs.set(insn.target, []);
@@ -104,7 +107,6 @@ export async function disassembleBinary(parsed) {
 		}
 	}
 
-    // Return the structured instructions and cross-references for further analysis or display
 	return { instructions, xrefs };
 }
 

@@ -157,6 +157,10 @@
 	function handleKeydown(e) {
 		if (e.key === 'Escape' && modalOpen) closeModal();
 	}
+
+	function patchedFileName() {
+		return fileName.replace(/(\.[^.]*)?$/, '_patched$1') || 'patched.out';
+	}
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -192,6 +196,17 @@
 		{#if error}
 			<span class="status error">{error}</span>
 		{/if}
+		{#if patches.length > 0 && parsed?.format === 'macho'}
+		<div class="codesign-note">
+			<strong>macOS binaries need re-signing after patching.</strong> Run this on the downloaded file:
+			<pre>
+				xattr -d com.apple.quarantine {patchedFileName()}
+				codesign --remove-signature {patchedFileName()}
+				codesign --sign - {patchedFileName()}
+				chmod +x {patchedFileName()}
+			</pre>
+		</div>
+	{/if}
 	</div>
 
 	{#if parsed}
@@ -343,13 +358,6 @@
 					</button>
 					<button class:active={modalMode === 'raw'} on:click={() => (modalMode = 'raw')}>
 						Raw Bytes
-					</button>
-					<button on:click={async () => {
-						const createPatcherModule = (await import('$lib/wasm/main.mjs')).default;
-						const mod = await createPatcherModule();
-						console.log(mod.debug_offset(patchedBytes, BigInt(modalInsn.address)));
-					}}>
-						Debug
 					</button>
 				</div>
 
@@ -816,5 +824,24 @@
 	.modal-footer .primary:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.codesign-note {
+		background: #fff3cd;
+		border-bottom: 1px solid #d4b106;
+		padding: 8px 14px;
+		font-size: 0.78rem;
+		color: #5c4400;
+	}
+	.codesign-note pre {
+		background: #2b2b2b;
+		color: #d9d9d9;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.75rem;
+		padding: 8px 10px;
+		border-radius: 4px;
+		margin: 6px 0 0;
+		white-space: pre-wrap;
+		overflow-x: auto;
 	}
 </style>

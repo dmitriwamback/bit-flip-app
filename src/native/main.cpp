@@ -53,7 +53,6 @@ TextSection find_text_macho(const std::vector<uint8_t>& data) {
                 uint32_t fileoff = *reinterpret_cast<const uint32_t*>(&data[sect_offset + 48]);
                 sect_offset += 80;
 
-                // trim embedded NULs so find() behaves like a normal C-string compare
                 sectname = sectname.c_str();
                 segname  = segname.c_str();
 
@@ -112,11 +111,11 @@ TextSection find_text_section(const std::vector<uint8_t>& data) {
 // Raw byte helpers
 // ============================================================
 
-uint32_t read_u32(const std::vector<uint8_t>& data, size_t off) {
+uint32_t read_u32(const std::vector<uint8_t>& data, uint64_t off) {
     if (off + 4 > data.size()) throw std::runtime_error("Read out of bounds");
     return *reinterpret_cast<const uint32_t*>(&data[off]);
 }
-void write_u32(std::vector<uint8_t>& data, size_t off, uint32_t val) {
+void write_u32(std::vector<uint8_t>& data, uint64_t off, uint32_t val) {
     if (off + 4 > data.size()) throw std::runtime_error("Write out of bounds");
     *reinterpret_cast<uint32_t*>(&data[off]) = val;
 }
@@ -136,27 +135,25 @@ enum class BranchKind {
 
 struct ClassifyResult {
     BranchKind kind;
-    size_t instr_len;
+    uint64_t instr_len;
 };
 
-ClassifyResult classify_arm64(const std::vector<uint8_t>& data, size_t off) {
+ClassifyResult classify_arm64(const std::vector<uint8_t>& data, uint64_t off) {
     uint32_t instr = read_u32(data, off);
 
-    // cbz/cbnz: bits 30-25 = 011010 (fixed), bit31(sf) and bit24(op) both vary
-    if ((instr & 0x7E000000) == 0x34000000)
+    if ((instr & 0x7E000000) == 0x34000000) // cbz/cbnz, either op bit
         return { BranchKind::ARM64_CBZ_CBNZ, 4 };
 
-    // tbz/tbnz: bits 30-25 = 011011 (fixed), bit31(part of bit pos) and bit24(op) both vary
-    if ((instr & 0x7E000000) == 0x36000000)
+    if ((instr & 0x7E000000) == 0x36000000) // tbz/tbnz, either op bit
         return { BranchKind::ARM64_TBZ_TBNZ, 4 };
 
-    if ((instr & 0xFF000000) == 0x54000000) // b.cond — this one was already correct
+    if ((instr & 0xFF000000) == 0x54000000) // b.cond
         return { BranchKind::ARM64_BCOND, 4 };
 
     return { BranchKind::NONE, 0 };
 }
 
-ClassifyResult classify_x86(const std::vector<uint8_t>& data, size_t off) {
+ClassifyResult classify_x86(const std::vector<uint8_t>& data, uint64_t off) {
     if (off >= data.size()) return { BranchKind::NONE, 0 };
     uint8_t b0 = data[off];
 
@@ -172,11 +169,11 @@ ClassifyResult classify_x86(const std::vector<uint8_t>& data, size_t off) {
     return { BranchKind::NONE, 0 };
 }
 
-ClassifyResult classify_instruction(const std::vector<uint8_t>& data, size_t off, bool is_arm64) {
+ClassifyResult classify_instruction(const std::vector<uint8_t>& data, uint64_t off, bool is_arm64) {
     return is_arm64 ? classify_arm64(data, off) : classify_x86(data, off);
 }
 
-void invert_instruction(std::vector<uint8_t>& data, size_t off, BranchKind kind) {
+void invert_instruction(std::vector<uint8_t>& data, uint64_t off, BranchKind kind) {
     switch (kind) {
         case BranchKind::ARM64_CBZ_CBNZ:
         case BranchKind::ARM64_TBZ_TBNZ: {
@@ -209,11 +206,9 @@ void invert_instruction(std::vector<uint8_t>& data, size_t off, BranchKind kind)
 // Public patch operations (operate on a full-file byte copy)
 // ============================================================
 
-// Flip a conditional branch at a virtual address. Works across
-// ELF/Mach-O and ARM64/x86 automatically.
 std::vector<uint8_t> flip_branch(std::vector<uint8_t> data, uint64_t target_addr) {
     TextSection sec = find_text_section(data);
-    size_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
+    uint64_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
 
     ClassifyResult result = classify_instruction(data, file_offset, sec.is_arm64);
     if (result.kind == BranchKind::NONE) {
@@ -224,11 +219,9 @@ std::vector<uint8_t> flip_branch(std::vector<uint8_t> data, uint64_t target_addr
     return data;
 }
 
-// NOP out `length` bytes starting at a virtual address. ARM64 uses the
-// fixed 4-byte NOP encoding; x86 repeats the single-byte 0x90.
-std::vector<uint8_t> nop_range(std::vector<uint8_t> data, uint64_t target_addr, size_t length) {
+std::vector<uint8_t> nop_range(std::vector<uint8_t> data, uint64_t target_addr, uint64_t length) {
     TextSection sec = find_text_section(data);
-    size_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
+    uint64_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
 
     if (file_offset + length > data.size()) {
         throw std::runtime_error("NOP range out of bounds");
@@ -237,21 +230,19 @@ std::vector<uint8_t> nop_range(std::vector<uint8_t> data, uint64_t target_addr, 
     if (sec.is_arm64) {
         if (length % 4 != 0) throw std::runtime_error("ARM64 NOP range must be a multiple of 4 bytes");
         const uint8_t nop[4] = { 0x1F, 0x20, 0x03, 0xD5 };
-        for (size_t i = 0; i < length; i += 4)
+        for (uint64_t i = 0; i < length; i += 4)
             for (int j = 0; j < 4; j++) data[file_offset + i + j] = nop[j];
     } else {
-        for (size_t i = 0; i < length; i++) data[file_offset + i] = 0x90;
+        for (uint64_t i = 0; i < length; i++) data[file_offset + i] = 0x90;
     }
 
     return data;
 }
 
-// Raw overwrite. newBytes must be exactly as long as the region being
-// replaced, so file offsets after it never shift.
 std::vector<uint8_t> write_bytes(std::vector<uint8_t> data, uint64_t target_addr,
                                   const std::vector<uint8_t>& newBytes) {
     TextSection sec = find_text_section(data);
-    size_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
+    uint64_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
 
     if (file_offset + newBytes.size() > data.size()) {
         throw std::runtime_error("Write out of bounds");
@@ -274,24 +265,27 @@ std::vector<uint8_t> jsBytesToVector(const val& jsBytes) {
     return data;
 }
 
+// Copies bytes out of the WASM heap into a real JS-owned Uint8Array.
+// MUST be used for every return value here — a bare typed_memory_view
+// over a local std::vector points at memory that's freed the instant
+// the C++ function returns, which silently corrupts the result.
 val toJsUint8Array(const std::vector<uint8_t>& buf) {
     val view = val(typed_memory_view(buf.size(), buf.data()));
     val Uint8Array = val::global("Uint8Array");
-    return Uint8Array.new_(view); // constructor copies immediately — independent of WASM heap after this
+    return Uint8Array.new_(view); // constructor copies immediately
 }
 
-val flip_branch_binding(val jsBytes, uint32_t addr_lo, uint32_t addr_hi) {
-    uint64_t target_addr = (static_cast<uint64_t>(addr_hi) << 32) | addr_lo;
+val flip_branch_binding(val jsBytes, uint64_t target_addr) {
     try {
         std::vector<uint8_t> data = jsBytesToVector(jsBytes);
         std::vector<uint8_t> patched = flip_branch(std::move(data), target_addr);
-        return val(typed_memory_view(patched.size(), patched.data()));
+        return toJsUint8Array(patched);
     } catch (const std::exception&) {
         return val::null();
     }
 }
 
-val nop_range_binding(val jsBytes, uint64_t target_addr, size_t length) {
+val nop_range_binding(val jsBytes, uint64_t target_addr, uint64_t length) {
     try {
         std::vector<uint8_t> data = jsBytesToVector(jsBytes);
         std::vector<uint8_t> patched = nop_range(std::move(data), target_addr, length);
@@ -316,7 +310,7 @@ val debug_offset(val jsBytes, uint64_t target_addr) {
     try {
         std::vector<uint8_t> data = jsBytesToVector(jsBytes);
         TextSection sec = find_text_section(data);
-        size_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
+        uint64_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
 
         val out = val::object();
         out.set("target_addr_received", val(std::to_string(target_addr)));
