@@ -1,4 +1,4 @@
-# Bit Flip App
+# Svelte Software Reverse Engineering (SRE) App
 
 ## Technologies
 <ul>
