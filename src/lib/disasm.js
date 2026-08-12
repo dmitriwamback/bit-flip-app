@@ -107,3 +107,20 @@ export async function disassembleBinary(parsed) {
     // Return the structured instructions and cross-references for further analysis or display
 	return { instructions, xrefs };
 }
+
+export function reslice(parsed, fullFileBytes) {
+	const sec = parsed.sections.find(
+		(s) => s.name === '.text' || s.name === '__text'
+	);
+	if (!sec) throw new Error('Could not find .text/__text section to reslice');
+
+	const fileOffset = sec.offset !== undefined ? sec.offset : sec.fileOffset;
+
+	return {
+		...parsed,
+		text: {
+			...parsed.text,
+			bytes: fullFileBytes.slice(fileOffset, fileOffset + sec.size)
+		}
+	};
+}

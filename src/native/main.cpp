@@ -280,11 +280,12 @@ val toJsUint8Array(const std::vector<uint8_t>& buf) {
     return Uint8Array.new_(view); // constructor copies immediately — independent of WASM heap after this
 }
 
-val flip_branch_binding(val jsBytes, uint64_t target_addr) {
+val flip_branch_binding(val jsBytes, uint32_t addr_lo, uint32_t addr_hi) {
+    uint64_t target_addr = (static_cast<uint64_t>(addr_hi) << 32) | addr_lo;
     try {
         std::vector<uint8_t> data = jsBytesToVector(jsBytes);
         std::vector<uint8_t> patched = flip_branch(std::move(data), target_addr);
-        return toJsUint8Array(patched); // copy happens here, while `patched` is still alive
+        return val(typed_memory_view(patched.size(), patched.data()));
     } catch (const std::exception&) {
         return val::null();
     }
@@ -311,8 +312,43 @@ val write_bytes_binding(val jsBytes, uint64_t target_addr, val jsNewBytes) {
     }
 }
 
+val debug_offset(val jsBytes, uint64_t target_addr) {
+    try {
+        std::vector<uint8_t> data = jsBytesToVector(jsBytes);
+        TextSection sec = find_text_section(data);
+        size_t file_offset = sec.file_offset + (target_addr - sec.vaddr);
+
+        val out = val::object();
+        out.set("target_addr_received", val(std::to_string(target_addr)));
+        out.set("section_vaddr", val(std::to_string(sec.vaddr)));
+        out.set("section_file_offset", val(std::to_string(sec.file_offset)));
+        out.set("section_size", val(std::to_string(sec.size)));
+        out.set("computed_file_offset", val(std::to_string(file_offset)));
+        out.set("is_arm64", sec.is_arm64);
+
+        if (file_offset + 4 <= data.size()) {
+            uint32_t raw = read_u32(data, file_offset);
+            char buf[11];
+            snprintf(buf, sizeof(buf), "0x%08x", raw);
+            out.set("raw_u32_at_offset", val(std::string(buf)));
+
+            ClassifyResult cr = classify_instruction(data, file_offset, sec.is_arm64);
+            out.set("classified_kind", (int)cr.kind);
+        } else {
+            out.set("error", val("computed offset is out of bounds"));
+        }
+
+        return out;
+    } catch (const std::exception& e) {
+        val out = val::object();
+        out.set("error", val(std::string(e.what())));
+        return out;
+    }
+}
+
 EMSCRIPTEN_BINDINGS(patcher_module) {
     function("flip_branch", &flip_branch_binding);
     function("nop_range", &nop_range_binding);
     function("write_bytes", &write_bytes_binding);
+    function("debug_offset", &debug_offset);
 }

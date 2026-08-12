@@ -1,6 +1,6 @@
 <script>
 	import { parseBinary } from '$lib/binary.js';
-	import { disassembleBinary } from '$lib/disasm.js';
+	import { disassembleBinary, reslice } from '$lib/disasm.js';
 	import { flipBranch, nopRange, writeBytes } from '$lib/patcher.js';
 
 	let parsed = $state(null);
@@ -343,6 +343,13 @@
 					</button>
 					<button class:active={modalMode === 'raw'} on:click={() => (modalMode = 'raw')}>
 						Raw Bytes
+					</button>
+					<button on:click={async () => {
+						const createPatcherModule = (await import('$lib/wasm/main.mjs')).default;
+						const mod = await createPatcherModule();
+						console.log(mod.debug_offset(patchedBytes, BigInt(modalInsn.address)));
+					}}>
+						Debug
 					</button>
 				</div>
 

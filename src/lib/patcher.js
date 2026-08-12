@@ -10,7 +10,10 @@ function getModule() {
 
 export async function flipBranch(fileBytes, targetAddr) {
 	const mod = await getModule();
-	const result = mod.flip_branch(fileBytes, BigInt(targetAddr));
+	const addr = BigInt(targetAddr);
+	const lo = Number(addr & 0xFFFFFFFFn);
+	const hi = Number(addr >> 32n);
+	const result = mod.flip_branch(fileBytes, lo, hi);
 	if (!result) throw new Error('No recognized conditional branch at this address');
 	return new Uint8Array(result);
 }
