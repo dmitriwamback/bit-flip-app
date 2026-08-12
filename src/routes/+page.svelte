@@ -1,10 +1,11 @@
 <script>
 	import { parseBinary } from '$lib/binary.js';
 	import { disassembleBinary } from '$lib/disasm.js';
+	import { flipBranch, nopRange, writeBytes } from '$lib/patcher.js';
 
 	let parsed = $state(null);
 	let instructions = $state([]);
-	let xrefs = new Map();
+	let xrefs = $state(new Map());
 	let error = $state(null);
 	let fileName = $state('');
 	let loading = $state(false);
@@ -12,19 +13,33 @@
 	let selectedAddr = $state(null);
 	let activeTab = $state('listing'); // 'listing' | 'symbols' | 'sections'
 
+	let originalBuffer = $state(null);   // ArrayBuffer, untouched
+	let patchedBytes = $state(null);     // Uint8Array, mutated by patches
+	let patches = $state([]);            // [{ address, offset, kind, before, after }]
+
+	// modal state
+	let modalOpen = $state(false);
+	let modalInsn = $state(null);
+	let modalMode = $state('flip'); // 'flip' | 'nop' | 'raw'
+	let modalRawHex = $state('');
+	let modalError = $state(null);
+	let modalBusy = $state(false);
+
 	async function handleFile(e) {
 		error = null;
 		parsed = null;
 		instructions = [];
+		patches = [];
 		const file = e.target.files?.[0];
 		if (!file) return;
 
 		fileName = file.name;
 		loading = true;
 		try {
-			const buf = await file.arrayBuffer();
-			parsed = parseBinary(buf);
+			originalBuffer = await file.arrayBuffer();
+			patchedBytes = new Uint8Array(originalBuffer.slice(0));
 
+			parsed = parseBinary(originalBuffer);
 			const result = await disassembleBinary(parsed);
 			instructions = result.instructions;
 			xrefs = result.xrefs;
@@ -57,12 +72,94 @@
 		return s.name === '.text' || s.name === '__text';
 	}
 
-	function labelFor(addr) {
-		const sym = isSymbolStart(addr);
-		if (sym) return sym.name;
-		return 'LAB_' + addr.toString(16).padStart(8, '0');
+	function isPatched(addr) {
+		return patches.some((p) => p.address === addr);
+	}
+
+	// ---- modal control ----
+	function openModal(insn) {
+		selectedAddr = insn.address;
+		modalInsn = insn;
+		modalMode = insn.group === 'jump' ? 'flip' : 'raw';
+		modalRawHex = insn.bytes;
+		modalError = null;
+		modalOpen = true;
+	}
+
+	function closeModal() {
+		modalOpen = false;
+		modalInsn = null;
+		modalError = null;
+	}
+
+	async function refreshDisasm() {
+		const result = await disassembleBinary(reslice(parsed, patchedBytes));
+		instructions = result.instructions;
+		xrefs = result.xrefs;
+	}
+
+	async function runPatch() {
+		if (!modalInsn) return;
+		modalBusy = true;
+		modalError = null;
+		try {
+			let result;
+			let kind;
+
+			if (modalMode === 'flip') {
+				result = await flipBranch(patchedBytes, modalInsn.address);
+				kind = 'flip';
+			} else if (modalMode === 'nop') {
+				result = await nopRange(patchedBytes, modalInsn.address, modalInsn.size);
+				kind = 'nop';
+			} else {
+				const clean = modalRawHex.trim().replace(/\s+/g, ' ');
+				const byteArr = clean.split(' ').map((h) => parseInt(h, 16));
+				if (byteArr.some(isNaN) || byteArr.length !== modalInsn.size) {
+					throw new Error(`Must be exactly ${modalInsn.size} byte(s) to preserve instruction length`);
+				}
+				result = await writeBytes(patchedBytes, modalInsn.address, byteArr);
+				kind = 'raw';
+			}
+
+			patchedBytes = result;
+			patches = [
+				...patches,
+				{
+					address: modalInsn.address,
+					offset: modalInsn.fileOffset,
+					kind,
+					before: modalInsn.bytes,
+					after: modalMode === 'raw' ? modalRawHex.trim() : '(patched)'
+				}
+			];
+
+			await refreshDisasm();
+			closeModal();
+		} catch (err) {
+			modalError = err.message;
+		} finally {
+			modalBusy = false;
+		}
+	}
+
+	function downloadPatched() {
+		if (!patchedBytes) return;
+		const blob = new Blob([patchedBytes], { type: 'application/octet-stream' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = fileName.replace(/(\.[^.]*)?$/, '_patched$1') || 'patched.out';
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
+	function handleKeydown(e) {
+		if (e.key === 'Escape' && modalOpen) closeModal();
 	}
 </script>
+
+<svelte:window on:keydown={handleKeydown} />
 
 <svelte:head>
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -75,7 +172,7 @@
 <div class="app">
 	<div class="toolbar">
 		<label class="open-btn">
-			<input type="file" accept=".out,.elf,application/octet-stream" onchange={handleFile} />
+			<input type="file" accept=".out,.elf,application/octet-stream" on:change={handleFile} />
 			📂 Open Binary
 		</label>
 		{#if fileName}
@@ -85,6 +182,10 @@
 			<span class="format-chip">{parsed.format.toUpperCase()}</span>
 		{/if}
 		<div class="spacer"></div>
+		{#if patches.length > 0}
+			<span class="patch-count">{patches.length} patch{patches.length === 1 ? '' : 'es'}</span>
+			<button class="download-btn" on:click={downloadPatched}>⬇ Download patched binary</button>
+		{/if}
 		{#if loading}
 			<span class="status">analyzing…</span>
 		{/if}
@@ -100,7 +201,7 @@
 				<ul class="tree">
 					<li class="tree-branch">Functions ({parsed.symbols.length})</li>
 					{#each parsed.symbols as sym}
-						<li class="tree-leaf" onclick={() => (selectedAddr = sym.address)}>
+						<li class="tree-leaf" on:click={() => (selectedAddr = sym.address)}>
 							<span class="tree-icon">ƒ</span>{sym.name}
 						</li>
 					{:else}
@@ -117,13 +218,13 @@
 
 			<main class="main-panel">
 				<div class="panel-tabs">
-					<button class:active={activeTab === 'listing'} onclick={() => (activeTab = 'listing')}>
+					<button class:active={activeTab === 'listing'} on:click={() => (activeTab = 'listing')}>
 						Listing
 					</button>
-					<button class:active={activeTab === 'symbols'} onclick={() => (activeTab = 'symbols')}>
+					<button class:active={activeTab === 'symbols'} on:click={() => (activeTab = 'symbols')}>
 						Symbol Table
 					</button>
-					<button class:active={activeTab === 'sections'} onclick={() => (activeTab = 'sections')}>
+					<button class:active={activeTab === 'sections'} on:click={() => (activeTab = 'sections')}>
 						Program Headers
 					</button>
 				</div>
@@ -142,13 +243,13 @@
 								class="line"
 								class:selected={selectedAddr === insn.address}
 								class:related={hoveredTarget === insn.address}
-								onmouseenter={() => (hoveredTarget = insn.target)}
-								onmouseleave={() => (hoveredTarget = null)}
-								onclick={() => (selectedAddr = insn.address)}
+								on:mouseenter={() => (hoveredTarget = insn.target)}
+								on:mouseleave={() => (hoveredTarget = null)}
+								on:click={() => openModal(insn)}
 							>
 								<span class="col-cursor"></span>
 								<span class="col-addr">{hex(insn.address)}</span>
-								<span class="col-bytes">{insn.bytes}</span>
+								<span class="col-bytes" class:patched={isPatched(insn.address)}>{insn.bytes}</span>
 								<span class="col-mnemonic {insn.group}">{insn.mnemonic}</span>
 								<span class="col-operands">{insn.operands}</span>
 								{#if xrefCount(insn.address) > 0}
@@ -221,6 +322,69 @@
 	{/if}
 </div>
 
+{#if modalOpen && modalInsn}
+	<div class="modal-backdrop" on:click={closeModal}>
+		<div class="modal" on:click|stopPropagation>
+			<div class="modal-header">
+				<div>
+					<span class="modal-addr">{hex(modalInsn.address)}</span>
+					<span class="modal-instr">{modalInsn.mnemonic} {modalInsn.operands}</span>
+				</div>
+				<button class="modal-close" on:click={closeModal}>✕</button>
+			</div>
+
+			<div class="modal-body">
+				<div class="mode-tabs">
+					<button class:active={modalMode === 'flip'} disabled={modalInsn.group !== 'jump'} on:click={() => (modalMode = 'flip')}>
+						Flip Branch
+					</button>
+					<button class:active={modalMode === 'nop'} on:click={() => (modalMode = 'nop')}>
+						NOP Out
+					</button>
+					<button class:active={modalMode === 'raw'} on:click={() => (modalMode = 'raw')}>
+						Raw Bytes
+					</button>
+				</div>
+
+				{#if modalMode === 'flip'}
+					<p class="mode-desc">
+						Inverts the branch condition (e.g. <code>cbnz ↔ cbz</code>, <code>je ↔ jne</code>).
+						Instruction length is unchanged, so nothing else shifts.
+					</p>
+				{:else if modalMode === 'nop'}
+					<p class="mode-desc">
+						Replaces this instruction with no-ops — execution falls straight through
+						as if the instruction (and any branch it represents) were never there.
+					</p>
+				{:else}
+					<p class="mode-desc">
+						Manually overwrite the raw bytes. Must be exactly
+						<strong>{modalInsn.size}</strong> byte{modalInsn.size === 1 ? '' : 's'} to keep
+						every later instruction's offset intact.
+					</p>
+					<input
+						class="raw-input"
+						bind:value={modalRawHex}
+						spellcheck="false"
+						placeholder="e.g. c0 00 00 34"
+					/>
+				{/if}
+
+				{#if modalError}
+					<div class="modal-error">{modalError}</div>
+				{/if}
+			</div>
+
+			<div class="modal-footer">
+				<button class="secondary" on:click={closeModal}>Cancel</button>
+				<button class="primary" disabled={modalBusy} on:click={runPatch}>
+					{modalBusy ? 'Applying…' : 'Apply Patch'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
 	:global(html, body) {
 		margin: 0;
@@ -238,7 +402,6 @@
 		height: 100vh;
 	}
 
-	/* Toolbar — Swing-style grey chrome */
 	.toolbar {
 		display: flex;
 		align-items: center;
@@ -264,7 +427,7 @@
 	.open-btn input {
 		display: none;
 	}
-	.file-chip, .format-chip {
+	.file-chip, .format-chip, .patch-count {
 		font-family: 'JetBrains Mono', monospace;
 		font-size: 0.72rem;
 		padding: 3px 8px;
@@ -277,8 +440,25 @@
 		background: #e2e8f0;
 		color: #1e4d8b;
 	}
+	.patch-count {
+		background: #ffe8b3;
+		border-color: #d4b106;
+		color: #5c4400;
+	}
 	.spacer {
 		flex: 1;
+	}
+	.download-btn {
+		font-size: 0.78rem;
+		padding: 5px 12px;
+		background: #2e7d32;
+		color: #fff;
+		border: 1px solid #1b5e20;
+		border-radius: 3px;
+		cursor: pointer;
+	}
+	.download-btn:hover {
+		background: #1b5e20;
 	}
 	.status {
 		font-size: 0.75rem;
@@ -295,7 +475,6 @@
 		min-height: 0;
 	}
 
-	/* Sidebar — Symbol Tree */
 	.sidebar {
 		width: 220px;
 		background: #f2f0eb;
@@ -348,7 +527,6 @@
 		font-style: italic;
 	}
 
-	/* Main panel */
 	.main-panel {
 		flex: 1;
 		display: flex;
@@ -376,11 +554,7 @@
 		font-weight: 600;
 		box-shadow: inset 0 -2px 0 #4a90d9;
 	}
-	.panel-tabs button:focus-visible {
-		outline: 2px solid #4a90d9;
-	}
 
-	/* Listing view — the core Ghidra-esque piece */
 	.listing {
 		flex: 1;
 		overflow: auto;
@@ -433,6 +607,10 @@
 	.col-bytes {
 		color: #999;
 	}
+	.col-bytes.patched {
+		color: #cc0000;
+		font-weight: 600;
+	}
 	.col-mnemonic {
 		color: #0000cc;
 		font-weight: 500;
@@ -452,7 +630,6 @@
 		justify-self: end;
 	}
 
-	/* Table views */
 	.table-wrap {
 		flex: 1;
 		overflow: auto;
@@ -501,5 +678,136 @@
 		justify-content: center;
 		color: #777;
 		font-size: 0.85rem;
+	}
+
+	/* ---- Modal ---- */
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.35);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 50;
+	}
+	.modal {
+		width: 460px;
+		max-width: 92vw;
+		background: #f5f3ee;
+		border: 1px solid #a8a296;
+		border-radius: 6px;
+		box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+		font-family: 'Inter', sans-serif;
+		overflow: hidden;
+	}
+	.modal-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 10px 14px;
+		background: #e8e5de;
+		border-bottom: 1px solid #c7c2b6;
+	}
+	.modal-addr {
+		font-family: 'JetBrains Mono', monospace;
+		font-weight: 600;
+		margin-right: 8px;
+	}
+	.modal-instr {
+		font-family: 'JetBrains Mono', monospace;
+		color: #555;
+		font-size: 0.85rem;
+	}
+	.modal-close {
+		background: none;
+		border: none;
+		font-size: 0.9rem;
+		cursor: pointer;
+		color: #666;
+	}
+	.modal-close:hover {
+		color: #000;
+	}
+	.modal-body {
+		padding: 14px;
+	}
+	.mode-tabs {
+		display: flex;
+		gap: 6px;
+		margin-bottom: 10px;
+	}
+	.mode-tabs button {
+		flex: 1;
+		padding: 6px 8px;
+		font-size: 0.75rem;
+		background: #ded9cf;
+		border: 1px solid #b7b2a6;
+		border-radius: 3px;
+		cursor: pointer;
+	}
+	.mode-tabs button.active {
+		background: #4a90d9;
+		color: #fff;
+		border-color: #2e6fb0;
+	}
+	.mode-tabs button:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.mode-desc {
+		font-size: 0.78rem;
+		color: #555;
+		line-height: 1.4;
+		margin: 0 0 10px;
+	}
+	.mode-desc code {
+		background: #e8e5de;
+		padding: 1px 4px;
+		border-radius: 3px;
+		font-family: 'JetBrains Mono', monospace;
+	}
+	.raw-input {
+		width: 100%;
+		padding: 6px 8px;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.85rem;
+		border: 1px solid #a8a296;
+		border-radius: 3px;
+	}
+	.modal-error {
+		margin-top: 10px;
+		padding: 6px 10px;
+		background: #fde8e8;
+		border: 1px solid #e0a0a0;
+		border-radius: 3px;
+		color: #a00;
+		font-size: 0.78rem;
+	}
+	.modal-footer {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		padding: 10px 14px;
+		border-top: 1px solid #c7c2b6;
+		background: #e8e5de;
+	}
+	.modal-footer button {
+		padding: 6px 14px;
+		font-size: 0.8rem;
+		border-radius: 3px;
+		cursor: pointer;
+	}
+	.modal-footer .secondary {
+		background: #ded9cf;
+		border: 1px solid #a8a296;
+	}
+	.modal-footer .primary {
+		background: #2e7d32;
+		color: #fff;
+		border: 1px solid #1b5e20;
+	}
+	.modal-footer .primary:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 </style>

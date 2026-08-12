@@ -11,15 +11,19 @@ export function parseMachoHeader(buf) {
 	let le;
 	if (magic === 0xcffaedfe) {
 		le = true; // MH_MAGIC_64 stored little-endian (normal on Intel/Apple Silicon Macs)
-	} else if (magic === 0xfeedfacf) {
+	} 
+    else if (magic === 0xfeedfacf) {
 		le = false; // MH_MAGIC_64 stored big-endian (rare, old PowerPC-era)
-	} else if (magic === 0xcefaedfe) {
+	} 
+    else if (magic === 0xcefaedfe) {
 		le = true; // MH_MAGIC (32-bit), little-endian
 		throw new Error('32-bit Mach-O not supported yet — only 64-bit is implemented');
-	} else if (magic === 0xfeedface) {
+	} 
+    else if (magic === 0xfeedface) {
 		le = false; // MH_MAGIC (32-bit), big-endian
 		throw new Error('32-bit Mach-O not supported yet — only 64-bit is implemented');
-	} else {
+	} 
+    else {
 		throw new Error('Unrecognized Mach-O magic: ' + magic.toString(16));
 	}
 

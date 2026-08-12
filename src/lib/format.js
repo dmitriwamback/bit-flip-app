@@ -7,7 +7,7 @@ export const FORMAT = {
 
 export function detectFormat(buf) {
 	const dv = new DataView(buf);
-	const magic32 = dv.getUint32(0, false); // big-endian read for comparison
+	const magic32 = dv.getUint32(0, false); // Read the first 4 bytes as a big-endian unsigned integer to identify the file format
 
 	if (magic32 === 0x7f454c46) return FORMAT.ELF;
 	if (magic32 === 0xfeedface || magic32 === 0xfeedfacf) return FORMAT.MACHO; // 32/64-bit, native-endian header
