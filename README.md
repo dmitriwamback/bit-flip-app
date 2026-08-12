@@ -7,4 +7,4 @@
 </ul>
 
 ## Sample image (Ghidra inspired)
-<img width="741" height="468" alt="Image" src="https://github.com/user-attachments/assets/828deef7-437d-48bd-a12f-a1a10f36a2e4" />
+<img width="886" height="694" alt="Image" src="https://github.com/user-attachments/assets/260f9234-23cc-43a0-b369-80a8239a15ef" />

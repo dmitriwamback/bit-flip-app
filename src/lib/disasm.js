@@ -62,7 +62,6 @@ function extractTarget(opStr) {
 }
 
 // Disassemble the binary and return structured instruction data along with cross-references
-// Disassemble the binary and return structured instruction data along with cross-references
 export async function disassembleBinary(parsed) {
 	await ensureLoaded();
 
